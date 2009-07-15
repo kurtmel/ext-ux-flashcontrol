@@ -94,10 +94,10 @@ Ext.ux.util.FlashControl.prototype = {
     autoDestroy : false,
 
     /**
-     * @cfg {Boolean} autoDragTracker Whether to check if "container" is draggable, and
-     * if that is the case, create a drag tracker for the container. The drag tracker does
-     * automatically check for dragstart/dragend events and hide/shows the flashComponend
-     * accordingly.
+     * @cfg {Boolean} autoDragTracker Whether to check if any of "container"'s parents
+     * are draggable, and if that is the case, create a dragTrackers for those elements.
+     * The drag tracker does automatically check for dragstart/dragend events and hide/shows
+     * the flashComponend accordingly.
      */
     autoDragTracker : false,
 
@@ -121,9 +121,9 @@ Ext.ux.util.FlashControl.prototype = {
     quirksIE : false,
 
     /**
-     * @type {Ext.dd.DragTracker} dragTracker The DragTracker used by this control, if any.
+     * @type {Array|Ext.dd.DragTracker} dragTrackers dragTrackers that were automatically added
      */
-    dragTracker : null,
+    dragTrackers : null,
 
     /**
      * @type {Object} listeners The listener configuration object as returned by
@@ -136,6 +136,20 @@ Ext.ux.util.FlashControl.prototype = {
      * which where attached to various components using "addListeners()"
      */
     appliedListeners : null,
+
+    /**
+     * @type {Ext.Window} windowParent If the control detects that the container is the
+     * child of an Ext.Window, it will retrieve some information, such as zIndex, from this
+     * window
+     */
+    windowParent : null,
+
+    /**
+     * @type {Ext.Window} lastWindow If the control detects this container to be nested within
+     * a Window, this property will store the first window in the DOM hierarchy, and if
+     * the window's container is teh document.body, install some workarounds if needed.
+     */
+    lastWindow : null,
 
     /**
      * This is a function that will be called once a container has been configured
@@ -268,7 +282,7 @@ Ext.ux.util.FlashControl.prototype = {
         }
 
         if (container && container != this.container) {
-            container.on('afterrender',      this.refreshListeners,     this);
+            container.on('afterrender', this.refreshListeners,     this);
             container.on('destroy',     this.onDestroy,            this);
             container.on('afterlayout', this.afterContainerLayout, this);
         }
@@ -280,7 +294,7 @@ Ext.ux.util.FlashControl.prototype = {
         this.flashComponent = flashComponent;
         this.container      = container;
 
-        if (this.container.rendered) {
+        if (this.container && this.container.rendered) {
             this.refreshListeners();
             this.afterContainerLayout();
         }
@@ -351,10 +365,11 @@ Ext.ux.util.FlashControl.prototype = {
             this.flashComponent.el.setStyle('position', 'absolute');
         }
 
-
-        var zIndex = parseInt(this.container.el.getStyle('zIndex'));
-        if (zIndex >= 0) {
-            this.flashComponent.el.setStyle('zIndex', zIndex+1);
+        if (this.windowParent) {
+            var zIndex = parseInt(this.windowParent.el.getStyle('zIndex'));
+            if (zIndex >= 0) {
+                this.flashComponent.el.setStyle('zIndex', zIndex+1);
+            }
         }
     },
 
@@ -388,6 +403,88 @@ Ext.ux.util.FlashControl.prototype = {
     },
 
     /**
+     * Traverses the containers and checks if the container sits within a window.
+     * The first window found will be stored in "windowParent" to determine the
+     * zIndex for the flashComponent. The last window found will be used to check whether
+     * this control needs to install some workarounds for FF, if quirksFF is set to true.
+     */
+    detectWindows : function()
+    {
+        var container = this.container;
+
+        while (container) {
+            if (container instanceof Ext.Window) {
+                if (!this.windowParent) {
+                    this.windowParent = container;
+                }
+                this.lastWindow = container;
+            }
+
+            container = container.ownerCt;
+        }
+
+        if (Ext.isGecko && this.quirksFF && (this.lastWindow.maximizable) && this.lastWindow.container.dom == document.body) {
+            var overflow = this.lastWindow.container.getStyle('overflow');
+            var rule = Ext.util.CSS.getRule('.ext-ux-flashcontrol-container.x-window-maximized-ct');
+            Ext.util.CSS.updateRule('.ext-ux-flashcontrol-container.x-window-maximized-ct', 'overflow', overflow);
+            this.lastWindow.container.addClass('ext-ux-flashcontrol-container')
+        }
+
+    },
+
+    /**
+     * Traverses the containers owners and checks whether a "dd" property
+     * exists for them, thus assuming that this parent  container is draggable.
+     * It will then install DragTrackers to be able to react to dragstart/dragend
+     * events.
+     * DragTrackers will only be installed if "autoDragTracker" is set to "true".
+     *
+     * @private
+     */
+    installDragTrackers : function()
+    {
+        if (!this.autoDragTracker) {
+            return;
+        }
+
+        var container   = this.container,
+            dragTracker = null,
+            dragEl      = null;
+
+        if (!this.dragTrackers) {
+            this.dragTrackers = [];
+        }
+
+        while (container) {
+            if (container.dd) {
+                dragEl = container.dd.getDragEl();
+
+                dragTracker = new Ext.dd.DragTracker({
+                    el        : new Ext.Element(dragEl),
+                    active    : true,
+                    autoStart : 100
+                });
+
+                dragTracker.on('dragstart', this.dragstart, this);
+                dragTracker.on('dragend',   this.dragend, this,
+                    (Ext.isIE ? {delay : 100} : {})
+                );
+
+                this.appliedListeners.push([
+                    dragTracker, 'dragstart', this.dragstart, this
+                ]);
+                this.appliedListeners.push([
+                    dragTracker, 'dragend', this.dragend, this
+                ]);
+
+                this.dragTrackers.push(dragTracker);
+            }
+
+            container = container.ownerCt;
+        }
+    },
+
+    /**
      * Attaches all listeners based on the config returned by
      * getListenerConfig().
      *
@@ -399,34 +496,9 @@ Ext.ux.util.FlashControl.prototype = {
             this.appliedListeners = [];
         }
 
-        if (this.autoDragTracker) {
-            if (this.container.dd) {
-                var dragEl = this.container.dd.getDragEl();
+        this.installDragTrackers();
 
-                this.dragTracker = new Ext.dd.DragTracker({
-                    el        : new Ext.Element(dragEl),
-                    active    : true,
-                    autoStart : 100
-                });
-
-                this.dragTracker.on('dragstart', this.dragstart, this);
-                this.dragTracker.on('dragend',   this.dragend, this, (Ext.isIE ? {delay : 100} : {}));
-
-                this.appliedListeners.push([
-                    this.dragTracker, 'dragstart', this.dragstart, this
-                ]);
-                this.appliedListeners.push([
-                    this.dragTracker, 'dragend', this.dragend, this
-                ]);
-            }
-        }
-
-        if (Ext.isGecko && this.quirksFF && (this.container.maximizable) && this.container.container.dom == document.body) {
-            var overflow = this.container.container.getStyle('overflow');
-            var rule = Ext.util.CSS.getRule('.ext-ux-flashcontrol-container.x-window-maximized-ct');
-            Ext.util.CSS.updateRule('.ext-ux-flashcontrol-container.x-window-maximized-ct', 'overflow', overflow);
-            this.container.container.addClass('ext-ux-flashcontrol-container')
-        }
+        this.detectWindows();
 
         var eventName   = null,
             func        = null,
@@ -504,14 +576,19 @@ Ext.ux.util.FlashControl.prototype = {
      */
     removeListeners : function()
     {
-        if (this.dragTracker) {
-            this.dragTracker.destroy();
-            this.dragTracker = null;
+        if (this.dragTrackers) {
+            for (var i = 0, len = this.dragTrackers.length; i < len; i++) {
+                this.dragTrackers[i].destroy();
+            }
+            this.dragTrackers = null;
         }
 
-        if (this.quirksFF && this.container.container.dom == document.body) {
-            this.container.container.removeClass('ext-ux-flashcontrol-container')
+        if (this.quirksFF && this.lastWindow && this.lastWindow.container.dom == document.body) {
+            this.lastWindow.container.removeClass('ext-ux-flashcontrol-container')
         }
+
+        this.lastWindow   = null;
+        this.windowParent = null;
 
         if (!this.appliedListeners) {
             return;
@@ -520,7 +597,6 @@ Ext.ux.util.FlashControl.prototype = {
         var listener = null;
         for (var i = 0, len = this.appliedListeners.length; i < len; i++) {
             listener = this.appliedListeners[i];
-
             listener[0].un(listener[1], listener[2], listener[3]);
         }
 

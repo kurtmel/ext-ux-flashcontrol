@@ -1,0 +1,3 @@
+Ext.ux.FlashControl is a mediator for flash movies in Ext JS driven applications - it delegates state informations from the Ext.Container the flash movie would have been usually added to and takes care of properly rendering the flash movie into the UI, preventing flaws like reload/restart/loss of the flash movie during DOM operations.
+
+Examples can be found here: http://www.siteartwork.de/flashcontrol/examples/
